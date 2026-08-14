@@ -42,7 +42,12 @@ async def connect_call(request: Request):
     receive-only and the bot would never be able to speak.
     """
     scenario_id = request.query_params.get("scenario", "1_simple_appointment")
-    call_id = request.query_params.get("call_id", "")
+
+    # Twilio includes CallSid in the webhook's form body - use that as our
+    # call_id so it also matches the recording Twilio creates for this call,
+    # rather than inventing a separate id we'd have to correlate later
+    form = await request.form()
+    call_id = form.get("CallSid", "")
 
     stream_url = f"{PUBLIC_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/media-stream"
 
