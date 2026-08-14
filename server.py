@@ -153,6 +153,15 @@ async def media_stream(twilio_ws: WebSocket):
                             "media": {"payload": event["delta"]},
                         }
                     )
+                elif event_type == "input_audio_buffer.speech_started":
+                    # caller started talking while the bot's audio was still
+                    # playing out on the Twilio side - stop the model from
+                    # generating more audio and flush what Twilio has queued
+                    # so playback stops immediately instead of finishing the
+                    # current sentence over the caller
+                    logger.info("barge-in detected, clearing playback buffer")
+                    await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                    await twilio_ws.send_json({"event": "clear", "streamSid": stream_sid})
                 elif event_type == "error":
                     logger.error("openai realtime error: %s", event)
 
