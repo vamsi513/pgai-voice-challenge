@@ -1,8 +1,9 @@
 import asyncio
-import base64
 import json
 import logging
 import os
+import time
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
@@ -19,6 +20,8 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_REALTIME_MODEL = os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_REALTIME_MODEL}"
+
+TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 
 # placeholder persona used until scenarios.py exists (build stage 7) - lets us
 # prove the audio path works end to end with a single hardcoded test case
@@ -88,6 +91,38 @@ def build_session_update(instructions: str) -> dict:
     }
 
 
+class Transcript:
+    """Accumulates a call's turns and writes them to disk after every turn.
+
+    Writing on every turn (not just at the end) means a transcript is still
+    usable on disk if the call drops or the server crashes mid-conversation.
+    """
+
+    def __init__(self, call_id: str, scenario_id: str):
+        self.call_id = call_id or f"test-{int(time.time())}"
+        self.scenario_id = scenario_id
+        self.turns = []
+        self.path = TRANSCRIPTS_DIR / f"{self.call_id}.json"
+
+    def add_turn(self, role: str, text: str):
+        if not text:
+            return
+        self.turns.append({"role": role, "text": text, "ts": time.time()})
+        self.save()
+
+    def save(self):
+        self.path.write_text(
+            json.dumps(
+                {
+                    "call_id": self.call_id,
+                    "scenario_id": self.scenario_id,
+                    "turns": self.turns,
+                },
+                indent=2,
+            )
+        )
+
+
 @app.websocket("/media-stream")
 async def media_stream(twilio_ws: WebSocket):
     """Bridges audio between a Twilio <Stream> and the OpenAI Realtime API.
@@ -101,6 +136,8 @@ async def media_stream(twilio_ws: WebSocket):
     stream_sid = None
     scenario_id = "default"
     call_id = ""
+    transcript = None
+    bot_transcript_buffer = ""
 
     openai_ws = await websockets.connect(
         OPENAI_REALTIME_URL,
@@ -111,7 +148,7 @@ async def media_stream(twilio_ws: WebSocket):
         await openai_ws.send(json.dumps(build_session_update(DEFAULT_INSTRUCTIONS)))
 
         async def twilio_to_openai():
-            nonlocal stream_sid, scenario_id, call_id
+            nonlocal stream_sid, scenario_id, call_id, transcript
             async for raw in twilio_ws.iter_text():
                 data = json.loads(raw)
                 event = data.get("event")
@@ -121,6 +158,7 @@ async def media_stream(twilio_ws: WebSocket):
                     params = data["start"].get("customParameters", {})
                     scenario_id = params.get("scenario", "default")
                     call_id = params.get("call_id", "")
+                    transcript = Transcript(call_id, scenario_id)
                     logger.info(
                         "stream started sid=%s scenario=%s call_id=%s",
                         stream_sid,
@@ -141,6 +179,7 @@ async def media_stream(twilio_ws: WebSocket):
                     break
 
         async def openai_to_twilio():
+            nonlocal bot_transcript_buffer
             async for raw in openai_ws:
                 event = json.loads(raw)
                 event_type = event.get("type")
@@ -153,6 +192,15 @@ async def media_stream(twilio_ws: WebSocket):
                             "media": {"payload": event["delta"]},
                         }
                     )
+                elif event_type == "response.output_audio_transcript.delta":
+                    bot_transcript_buffer += event.get("delta", "")
+                elif event_type == "response.output_audio_transcript.done":
+                    if transcript:
+                        transcript.add_turn("bot", bot_transcript_buffer.strip())
+                    bot_transcript_buffer = ""
+                elif event_type == "conversation.item.input_audio_transcription.completed":
+                    if transcript:
+                        transcript.add_turn("agent", event.get("transcript", "").strip())
                 elif event_type == "input_audio_buffer.speech_started":
                     # caller started talking while the bot's audio was still
                     # playing out on the Twilio side - stop the model from
