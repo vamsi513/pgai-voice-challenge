@@ -11,6 +11,8 @@ from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
+from scenarios import get_scenario
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -22,18 +24,6 @@ OPENAI_REALTIME_MODEL = os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mi
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_REALTIME_MODEL}"
 
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
-
-# placeholder persona used until scenarios.py exists (build stage 7) - lets us
-# prove the audio path works end to end with a single hardcoded test case
-DEFAULT_INSTRUCTIONS = (
-    "You are Alex, a patient calling a medical office to schedule a routine "
-    "check-up appointment. You are friendly and speak naturally, like a real "
-    "person on the phone, not a script. Keep your turns short. Your goal is "
-    "to book an appointment sometime in the next two weeks. If the person "
-    "you're speaking with goes off topic or doesn't move the conversation "
-    "toward scheduling, politely steer the conversation back toward booking "
-    "the appointment."
-)
 
 app = FastAPI()
 
@@ -51,7 +41,7 @@ async def connect_call(request: Request):
     stream. Must use <Connect><Stream>, not <Start><Stream> - Start is
     receive-only and the bot would never be able to speak.
     """
-    scenario_id = request.query_params.get("scenario", "default")
+    scenario_id = request.query_params.get("scenario", "1_simple_appointment")
     call_id = request.query_params.get("call_id", "")
 
     stream_url = f"{PUBLIC_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/media-stream"
@@ -145,8 +135,6 @@ async def media_stream(twilio_ws: WebSocket):
     )
 
     try:
-        await openai_ws.send(json.dumps(build_session_update(DEFAULT_INSTRUCTIONS)))
-
         async def twilio_to_openai():
             nonlocal stream_sid, scenario_id, call_id, transcript
             async for raw in twilio_ws.iter_text():
@@ -159,6 +147,10 @@ async def media_stream(twilio_ws: WebSocket):
                     scenario_id = params.get("scenario", "default")
                     call_id = params.get("call_id", "")
                     transcript = Transcript(call_id, scenario_id)
+                    scenario = get_scenario(scenario_id)
+                    await openai_ws.send(
+                        json.dumps(build_session_update(scenario["instructions"]))
+                    )
                     logger.info(
                         "stream started sid=%s scenario=%s call_id=%s",
                         stream_sid,
