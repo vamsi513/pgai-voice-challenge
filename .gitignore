@@ -1,0 +1,10 @@
+.env
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+
+# recordings are pulled from Twilio after calls and can be large;
+# keep them out of git, reference them from bug_reports/BUGS.md instead
+recordings/*.mp3
